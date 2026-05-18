@@ -245,7 +245,8 @@ Function Get-UALGraph {
                     if ($errMsg -like "*BadGateway*" -or $errMsg -like "*502*" -or
                         $errMsg -like "*ServiceUnavailable*" -or $errMsg -like "*503*" -or
                         $errMsg -like "*GatewayTimeout*" -or $errMsg -like "*504*" -or
-                        $errMsg -like "*server side error*" -or $errMsg -like "*timed out*") {
+                        $errMsg -like "*server side error*" -or $errMsg -like "*timed out*" -or
+                        $errMsg -like "*ResponseEnded*") {
                         $pollRetry++
                         $retryDelay = [math]::Min(60, $pollDelay * [math]::Pow(2, $pollRetry))
                         Write-LogFile -Message "[WARNING] Transient error polling search status (attempt $pollRetry/$maxPollRetries): $errMsg. Retrying in $retryDelay s..." -Color "Yellow" -Level Minimal
