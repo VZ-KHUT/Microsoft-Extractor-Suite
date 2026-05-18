@@ -90,6 +90,10 @@ Function Get-UALGraph {
     because both endpoints have experienced reliability issues and the beta endpoint is currently more
     stable. Use this switch to opt-in to the v1.0 endpoint when it is available and stable in your tenant.
 
+    .PARAMETER SkipDownload
+    When specified only the search job is started, but no results are downloaded.
+    Can be used in combination with SearchId to start a search and download results at a later time.
+
     .EXAMPLE
     Get-UALGraph -searchName Test 
     Gets all the unified audit log entries.
@@ -133,6 +137,7 @@ Function Get-UALGraph {
         [switch]$SplitFiles,
         [string]$SearchId = "",
         [switch]$UseV1,
+        [switch]$SkipDownload,
         [switch]$AuditDataOnly
     )
 
@@ -290,247 +295,254 @@ Function Get-UALGraph {
     $summary.CollectionEndTime = Get-Date
 
     try {
-        write-logFile -Message "[INFO] Collecting scan results from api (this may take a while)" -Level Standard
-        $date = [datetime]::Now.ToString('yyyyMMddHHmmss') 
+        if($SkipDownload) {
+            Write-LogFile -Message "[INFO] Skipping download of results as per -SkipDownload switch. Search ID: $scanId" -Level Standard
+            $filePath = Join-Path -Path $outputDirPath -ChildPath "scanId.txt"
+            $scanId | Out-File -FilePath $filePath -Encoding $Encoding
+            Write-LogFile -Message "[INFO] Search ID saved to: $filePath"
+        } else {
+            write-logFile -Message "[INFO] Collecting scan results from api (this may take a while)" -Level Standard
+            $date = [datetime]::Now.ToString('yyyyMMddHHmmss')
 
-        $fileCounter = 1
-        $currentFileEvents = 0
-        $totalEvents = 0
-        $outputFileBase = "$($date)-$searchName-UnifiedAuditLog"
+            $fileCounter = 1
+            $currentFileEvents = 0
+            $totalEvents = 0
+            $outputFileBase = "$($date)-$searchName-UnifiedAuditLog"
 
-        if ($SplitFiles) {
-            if ($Output -eq "JSON") {
-                $outputFilePath = "$outputFileBase-part$fileCounter.json"
-                $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
-                "[" | Out-File -FilePath $filePath -Encoding $Encoding
-                $firstRecordInFile = $true
-            } 
-            elseif ($Output -eq "CSV") {
-                $outputFilePath = "$outputFileBase-part$fileCounter.csv"
-                $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
-                $csvCollection = [System.Collections.Generic.List[object]]::new()
-            }
-            elseif ($Output -eq "JSONL") {
-                $outputFilePath = "$outputFileBase-part$fileCounter.jsonl"
-                $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
-                $firstRecordInFile = $true
-            }
-            elseif ($Output -eq "SOF-ELK") {
-                $outputFilePath = "$outputFileBase-part$fileCounter.json"
-                $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
-            }
-        } 
-        else {
-            if ($Output -eq "JSON") {
-                $outputFilePath = "$outputFileBase.json"
-                $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
-                "[" | Out-File -FilePath $filePath -Encoding $Encoding
-                $firstRecordInFile = $true
-            }
-            elseif ($Output -eq "CSV") {
-                $outputFilePath = "$outputFileBase.csv"
-                $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
-                $csvCollection = [System.Collections.Generic.List[object]]::new()
-            }
-            elseif ($Output -eq "JSONL") {
-                $outputFilePath = "$outputFileBase.jsonl"
-                $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
-                $firstRecordInFile = $true
-            }
-            elseif ($Output -eq "SOF-ELK") {
-                $outputFilePath = "$outputFileBase.json"
-                $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
-            }
-        }
-
-        if ($isDebugEnabled) {
-            Write-LogFile -Message "[DEBUG] Starting data collection:" -Level Debug
-            Write-LogFile -Message "[DEBUG]   Split files: $SplitFiles" -Level Debug
-            Write-LogFile -Message "[DEBUG]   Max events per file: $MaxEventsPerFile" -Level Debug
-            Write-LogFile -Message "[DEBUG]   Initial file path: $filePath" -Level Debug
-        }
-
-        $apiUrl = "$apiBase/$scanId/records"
-        Write-LogFile -Message "[INFO] Starting to collect records..." -Level Standard
-
-        Do {
-            $maxRetries = 10
-            $retryCount = 0
-            $success = $false
-            $response = $null
-
-            while (-not $success -and $retryCount -lt $maxRetries) {
-                try {
-                    if ($isDebugEnabled) {
-                        Write-LogFile -Message "[DEBUG] Attempting to fetch records batch (attempt $($retryCount + 1))" -Level Debug
-                        Write-LogFile -Message "[DEBUG] API URL: $apiUrl" -Level Debug
-                    }
-                    $response = Invoke-MgGraphRequest -Method Get -Uri $apiUrl -ContentType "application/json; odata.metadata=minimal; odata.streaming=true;" -OutputType Json
-                    $success = $true
-                    if ($isDebugEnabled) {
-                        Write-LogFile -Message "[DEBUG] Successfully retrieved batch data" -Level Debug
-                    }
-                }
-                catch {
-                    $retryCount++
-                    $errorMessage = $_.Exception.Message
-
-                    if ($isDebugEnabled) {
-                        Write-LogFile -Message "[DEBUG] Error details:" -Level Debug
-                        Write-LogFile -Message "[DEBUG]   Exception type: $($_.Exception.GetType().Name)" -Level Debug
-                        Write-LogFile -Message "[DEBUG]   Error message: $errorMessage" -Level Debug
-                        Write-LogFile -Message "[DEBUG]   Retry count: $retryCount of $maxRetries" -Level Debug
-                    }
-                    
-                    
-                    if ($retryCount -lt $maxRetries) {
-                        $waitTime = 30 * $retryCount
-                        Write-LogFile -Message "[WARNING] Error: $errorMessage. Retry $retryCount of $maxRetries. Waiting $waitTime seconds before retrying..." -Color "Yellow" -Level Standard
-                        Start-Sleep -Seconds $waitTime
-                        
-                        try {
-                            $graphAuth = Get-GraphAuthType -RequiredScopes $RequiredScopes
-                            Write-LogFile -Message "[INFO] Successfully refreshed Graph API connection." -Level Standard
-                        }
-                        catch {
-                            Write-LogFile -Message "[WARNING] Failed to refresh credentials: $($_.Exception.Message)" -Level Standard
-                        }
-                    }
-                    else {
-                        Write-LogFile -Message "[ERROR] Failed after $maxRetries attempts: $errorMessage" -Color "Red" -Level Minimal
-                        throw $_  
-                    }
-                }
-            }
-
-            $responseJson = $response | ConvertFrom-Json 
-
-            if ($responseJson.value -and $responseJson.value.Count -gt 0) {
-                $batchCount = $responseJson.value.Count
-                $totalEvents += $batchCount
-
-                if ($isDebugEnabled) {
-                    Write-LogFile -Message "[DEBUG] Processing batch: $batchCount records (Total: $totalEvents)" -Level Debug
-                    Write-LogFile -Message "[DEBUG] Current file events: $currentFileEvents" -Level Debug
-                }
-
+            if ($SplitFiles) {
                 if ($Output -eq "JSON") {
-                    foreach ($record in $responseJson.value) {
-                        if ($SplitFiles -and $currentFileEvents -ge $MaxEventsPerFile) {
-                            "]" | Out-File -FilePath $filePath -Append -Encoding $Encoding
-                            Write-LogFile -Message "[INFO] File complete: $outputFilePath ($currentFileEvents events)" -Level Standard
-                            
-                            $fileCounter++
-                            $summary.ExportedFiles++
-                            $currentFileEvents = 0
-                            
-                            $outputFilePath = "$outputFileBase-part$fileCounter.json"
-                            $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
-                            "[" | Out-File -FilePath $filePath -Encoding $Encoding
-                            $firstRecordInFile = $true
-                        }
-
-                        if (-not $firstRecordInFile) {
-                            "," | Out-File -FilePath $filePath -Append -Encoding $Encoding -NoNewline
-                        } else {
-                            $firstRecordInFile = $false
-                        }
-                        "`r`n" | Out-File -FilePath $filePath -Append -Encoding $Encoding -NoNewline
-
-                        if ($AuditDataOnly) {
-                            $record.auditData | ConvertTo-Json -Depth 100 | Out-File -FilePath $filePath -Append -Encoding $Encoding -NoNewline
-                        } else {
-                            $record | ConvertTo-Json -Depth 100 | Out-File -FilePath $filePath -Append -Encoding $Encoding -NoNewline
-                        }
-
-                        $currentFileEvents++
-                        $summary.ProcessedRecords++
-                    }
+                    $outputFilePath = "$outputFileBase-part$fileCounter.json"
+                    $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
+                    "[" | Out-File -FilePath $filePath -Encoding $Encoding
+                    $firstRecordInFile = $true
                 }
                 elseif ($Output -eq "CSV") {
-                    if ($responseJson.value) { $csvCollection.AddRange([object[]]$responseJson.value) }
-                    $currentFileEvents += $batchCount
-                    $summary.ProcessedRecords += $batchCount
-
-                    if ($SplitFiles -and $currentFileEvents -ge $MaxEventsPerFile) {
-                        $csvCollection | Select-Object id, createdDateTime, auditLogRecordType, operation, organizationId, userType, userId, service, objectId, userPrincipalName, clientIp, @{Name = "administrativeUnits"; Expression = { $_.administrativeUnits -join '; ' }}, @{Name = "auditData"; Expression = { $_.auditData | ConvertTo-Json -Depth 100 } } | Export-Csv -Path $filePath -Append -Encoding $Encoding -NoTypeInformation
-                        Write-LogFile -Message "[INFO] File complete: $outputFilePath ($currentFileEvents events)" -Level Standard
-
-                        $fileCounter++
-                        $summary.ExportedFiles++
-                        $currentFileEvents = 0
-
-                        $csvCollection = [System.Collections.Generic.List[object]]::new()
-                        $outputFilePath = "$outputFileBase-part$fileCounter.csv"
-                        $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
-                    }
+                    $outputFilePath = "$outputFileBase-part$fileCounter.csv"
+                    $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
+                    $csvCollection = [System.Collections.Generic.List[object]]::new()
                 }
                 elseif ($Output -eq "JSONL") {
-                    foreach ($record in $responseJson.value) {
-                        if ($SplitFiles -and $currentFileEvents -ge $MaxEventsPerFile) {
-                            Write-LogFile -Message "[INFO] File complete: $outputFilePath ($currentFileEvents events)" -Level Standard
-
-                            $fileCounter++
-                            $summary.ExportedFiles++
-                            $currentFileEvents = 0
-
-                            $outputFilePath = "$outputFileBase-part$fileCounter.jsonl"
-                            $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
-                        }
-                        if ($record.auditData) {
-                            $record.auditData | ConvertTo-Json -Compress -Depth 100 |
-                                Out-File -Append $filePath -Encoding UTF8
-                        }
-                        $currentFileEvents++
-                        $summary.ProcessedRecords++
-                    }
+                    $outputFilePath = "$outputFileBase-part$fileCounter.jsonl"
+                    $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
+                    $firstRecordInFile = $true
                 }
                 elseif ($Output -eq "SOF-ELK") {
-                    foreach ($record in $responseJson.value) {
+                    $outputFilePath = "$outputFileBase-part$fileCounter.json"
+                    $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
+                }
+            }
+            else {
+                if ($Output -eq "JSON") {
+                    $outputFilePath = "$outputFileBase.json"
+                    $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
+                    "[" | Out-File -FilePath $filePath -Encoding $Encoding
+                    $firstRecordInFile = $true
+                }
+                elseif ($Output -eq "CSV") {
+                    $outputFilePath = "$outputFileBase.csv"
+                    $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
+                    $csvCollection = [System.Collections.Generic.List[object]]::new()
+                }
+                elseif ($Output -eq "JSONL") {
+                    $outputFilePath = "$outputFileBase.jsonl"
+                    $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
+                    $firstRecordInFile = $true
+                }
+                elseif ($Output -eq "SOF-ELK") {
+                    $outputFilePath = "$outputFileBase.json"
+                    $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
+                }
+            }
+
+            if ($isDebugEnabled) {
+                Write-LogFile -Message "[DEBUG] Starting data collection:" -Level Debug
+                Write-LogFile -Message "[DEBUG]   Split files: $SplitFiles" -Level Debug
+                Write-LogFile -Message "[DEBUG]   Max events per file: $MaxEventsPerFile" -Level Debug
+                Write-LogFile -Message "[DEBUG]   Initial file path: $filePath" -Level Debug
+            }
+
+            $apiUrl = "$apiBase/$scanId/records"
+            Write-LogFile -Message "[INFO] Starting to collect records..." -Level Standard
+
+            Do {
+                $maxRetries = 10
+                $retryCount = 0
+                $success = $false
+                $response = $null
+
+                while (-not $success -and $retryCount -lt $maxRetries) {
+                    try {
+                        if ($isDebugEnabled) {
+                            Write-LogFile -Message "[DEBUG] Attempting to fetch records batch (attempt $($retryCount + 1))" -Level Debug
+                            Write-LogFile -Message "[DEBUG] API URL: $apiUrl" -Level Debug
+                        }
+                        $response = Invoke-MgGraphRequest -Method Get -Uri $apiUrl -ContentType "application/json; odata.metadata=minimal; odata.streaming=true;" -OutputType Json
+                        $success = $true
+                        if ($isDebugEnabled) {
+                            Write-LogFile -Message "[DEBUG] Successfully retrieved batch data" -Level Debug
+                        }
+                    }
+                    catch {
+                        $retryCount++
+                        $errorMessage = $_.Exception.Message
+
+                        if ($isDebugEnabled) {
+                            Write-LogFile -Message "[DEBUG] Error details:" -Level Debug
+                            Write-LogFile -Message "[DEBUG]   Exception type: $($_.Exception.GetType().Name)" -Level Debug
+                            Write-LogFile -Message "[DEBUG]   Error message: $errorMessage" -Level Debug
+                            Write-LogFile -Message "[DEBUG]   Retry count: $retryCount of $maxRetries" -Level Debug
+                        }
+
+
+                        if ($retryCount -lt $maxRetries) {
+                            $waitTime = 30 * $retryCount
+                            Write-LogFile -Message "[WARNING] Error: $errorMessage. Retry $retryCount of $maxRetries. Waiting $waitTime seconds before retrying..." -Color "Yellow" -Level Standard
+                            Start-Sleep -Seconds $waitTime
+
+                            try {
+                                $graphAuth = Get-GraphAuthType -RequiredScopes $RequiredScopes
+                                Write-LogFile -Message "[INFO] Successfully refreshed Graph API connection." -Level Standard
+                            }
+                            catch {
+                                Write-LogFile -Message "[WARNING] Failed to refresh credentials: $($_.Exception.Message)" -Level Standard
+                            }
+                        }
+                        else {
+                            Write-LogFile -Message "[ERROR] Failed after $maxRetries attempts: $errorMessage" -Color "Red" -Level Minimal
+                            throw $_
+                        }
+                    }
+                }
+
+                $responseJson = $response | ConvertFrom-Json
+
+                if ($responseJson.value -and $responseJson.value.Count -gt 0) {
+                    $batchCount = $responseJson.value.Count
+                    $totalEvents += $batchCount
+
+                    if ($isDebugEnabled) {
+                        Write-LogFile -Message "[DEBUG] Processing batch: $batchCount records (Total: $totalEvents)" -Level Debug
+                        Write-LogFile -Message "[DEBUG] Current file events: $currentFileEvents" -Level Debug
+                    }
+
+                    if ($Output -eq "JSON") {
+                        foreach ($record in $responseJson.value) {
+                            if ($SplitFiles -and $currentFileEvents -ge $MaxEventsPerFile) {
+                                "]" | Out-File -FilePath $filePath -Append -Encoding $Encoding
+                                Write-LogFile -Message "[INFO] File complete: $outputFilePath ($currentFileEvents events)" -Level Standard
+
+                                $fileCounter++
+                                $summary.ExportedFiles++
+                                $currentFileEvents = 0
+
+                                $outputFilePath = "$outputFileBase-part$fileCounter.json"
+                                $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
+                                "[" | Out-File -FilePath $filePath -Encoding $Encoding
+                                $firstRecordInFile = $true
+                            }
+
+                            if (-not $firstRecordInFile) {
+                                "," | Out-File -FilePath $filePath -Append -Encoding $Encoding -NoNewline
+                            } else {
+                                $firstRecordInFile = $false
+                            }
+                            "`r`n" | Out-File -FilePath $filePath -Append -Encoding $Encoding -NoNewline
+
+                            if ($AuditDataOnly) {
+                                $record.auditData | ConvertTo-Json -Depth 100 | Out-File -FilePath $filePath -Append -Encoding $Encoding -NoNewline
+                            } else {
+                                $record | ConvertTo-Json -Depth 100 | Out-File -FilePath $filePath -Append -Encoding $Encoding -NoNewline
+                            }
+
+                            $currentFileEvents++
+                            $summary.ProcessedRecords++
+                        }
+                    }
+                    elseif ($Output -eq "CSV") {
+                        if ($responseJson.value) { $csvCollection.AddRange([object[]]$responseJson.value) }
+                        $currentFileEvents += $batchCount
+                        $summary.ProcessedRecords += $batchCount
+
                         if ($SplitFiles -and $currentFileEvents -ge $MaxEventsPerFile) {
+                            $csvCollection | Select-Object id, createdDateTime, auditLogRecordType, operation, organizationId, userType, userId, service, objectId, userPrincipalName, clientIp, @{Name = "administrativeUnits"; Expression = { $_.administrativeUnits -join '; ' }}, @{Name = "auditData"; Expression = { $_.auditData | ConvertTo-Json -Depth 100 } } | Export-Csv -Path $filePath -Append -Encoding $Encoding -NoTypeInformation
                             Write-LogFile -Message "[INFO] File complete: $outputFilePath ($currentFileEvents events)" -Level Standard
-                            
+
                             $fileCounter++
                             $summary.ExportedFiles++
                             $currentFileEvents = 0
 
-                            $outputFilePath = "$outputFileBase-part$fileCounter.json"
+                            $csvCollection = [System.Collections.Generic.List[object]]::new()
+                            $outputFilePath = "$outputFileBase-part$fileCounter.csv"
                             $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
                         }
-                        if ($record.auditData) {
-                            $record.auditData | ConvertTo-Json -Compress -Depth 100 | 
-                                Out-File -Append $filePath -Encoding UTF8
+                    }
+                    elseif ($Output -eq "JSONL") {
+                        foreach ($record in $responseJson.value) {
+                            if ($SplitFiles -and $currentFileEvents -ge $MaxEventsPerFile) {
+                                Write-LogFile -Message "[INFO] File complete: $outputFilePath ($currentFileEvents events)" -Level Standard
+
+                                $fileCounter++
+                                $summary.ExportedFiles++
+                                $currentFileEvents = 0
+
+                                $outputFilePath = "$outputFileBase-part$fileCounter.jsonl"
+                                $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
+                            }
+                            if ($record.auditData) {
+                                $record.auditData | ConvertTo-Json -Compress -Depth 100 |
+                                    Out-File -Append $filePath -Encoding UTF8
+                            }
+                            $currentFileEvents++
+                            $summary.ProcessedRecords++
                         }
-                        $currentFileEvents++
-                        $summary.ProcessedRecords++
+                    }
+                    elseif ($Output -eq "SOF-ELK") {
+                        foreach ($record in $responseJson.value) {
+                            if ($SplitFiles -and $currentFileEvents -ge $MaxEventsPerFile) {
+                                Write-LogFile -Message "[INFO] File complete: $outputFilePath ($currentFileEvents events)" -Level Standard
+
+                                $fileCounter++
+                                $summary.ExportedFiles++
+                                $currentFileEvents = 0
+
+                                $outputFilePath = "$outputFileBase-part$fileCounter.json"
+                                $filePath = Join-Path -Path $outputDirPath -ChildPath $outputFilePath
+                            }
+                            if ($record.auditData) {
+                                $record.auditData | ConvertTo-Json -Compress -Depth 100 |
+                                    Out-File -Append $filePath -Encoding UTF8
+                            }
+                            $currentFileEvents++
+                            $summary.ProcessedRecords++
+                        }
+                    }
+
+                    if ($totalEvents % 10000 -eq 0 -or $batchCount -lt 100) {
+                        Write-LogFile -Message "[INFO] Progress: $totalEvents total events processed" -Level Standard
+                        if ($isDebugEnabled) {
+                            Write-LogFile -Message "[DEBUG] Progress details:" -Level Debug
+                            Write-LogFile -Message "[DEBUG]   Batch size: $batchCount" -Level Debug
+                            Write-LogFile -Message "[DEBUG]   Current file: $outputFilePath" -Level Debug
+                            Write-LogFile -Message "[DEBUG]   Current file events: $currentFileEvents" -Level Debug
+                        }
+                    }
+                } else {
+                    if ($totalEvents -eq 0) {
+                        Write-LogFile -Message "[INFO] No results matched your search." -Color Yellow -Level Minimal
                     }
                 }
+                $apiUrl = $responseJson.'@odata.nextLink'
+            } While ($apiUrl)
 
-                if ($totalEvents % 10000 -eq 0 -or $batchCount -lt 100) {
-                    Write-LogFile -Message "[INFO] Progress: $totalEvents total events processed" -Level Standard
-                    if ($isDebugEnabled) {
-                        Write-LogFile -Message "[DEBUG] Progress details:" -Level Debug
-                        Write-LogFile -Message "[DEBUG]   Batch size: $batchCount" -Level Debug
-                        Write-LogFile -Message "[DEBUG]   Current file: $outputFilePath" -Level Debug
-                        Write-LogFile -Message "[DEBUG]   Current file events: $currentFileEvents" -Level Debug
-                    }
+            if ($currentFileEvents -gt 0) {
+                if ($Output -eq "JSON") {
+                    "]" | Out-File -FilePath $filePath -Append -Encoding $Encoding
                 }
-            } else {
-                if ($totalEvents -eq 0) {
-                    Write-LogFile -Message "[INFO] No results matched your search." -Color Yellow -Level Minimal
+                elseif ($Output -eq "CSV" -and $csvCollection.Count -gt 0) {
+                    $csvCollection | Select-Object id, createdDateTime, auditLogRecordType, operation, organizationId, userType, userId, service, objectId, userPrincipalName, clientIp, @{Name = "administrativeUnits"; Expression = { $_.administrativeUnits -join '; ' }}, @{Name = "auditData"; Expression = { $_.auditData | ConvertTo-Json -Depth 100 } } | Export-Csv -Path $filePath -Append -Encoding $Encoding -NoTypeInformation
                 }
+                $summary.ExportedFiles++
             }
-            $apiUrl = $responseJson.'@odata.nextLink'
-        } While ($apiUrl)
-
-        if ($currentFileEvents -gt 0) {
-            if ($Output -eq "JSON") {
-                "]" | Out-File -FilePath $filePath -Append -Encoding $Encoding
-            }
-            elseif ($Output -eq "CSV" -and $csvCollection.Count -gt 0) {
-                $csvCollection | Select-Object id, createdDateTime, auditLogRecordType, operation, organizationId, userType, userId, service, objectId, userPrincipalName, clientIp, @{Name = "administrativeUnits"; Expression = { $_.administrativeUnits -join '; ' }}, @{Name = "auditData"; Expression = { $_.auditData | ConvertTo-Json -Depth 100 } } | Export-Csv -Path $filePath -Append -Encoding $Encoding -NoTypeInformation
-            }
-            $summary.ExportedFiles++
         }
 
         $summary.TotalRecords = $totalEvents
