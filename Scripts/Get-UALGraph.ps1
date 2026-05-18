@@ -195,17 +195,35 @@ Function Get-UALGraph {
     try {
         if(!$SearchId)
         {
-            if ($isDebugEnabled)
-            {
-                Write-LogFile -Message "[DEBUG] Initiating Graph API audit log query..." -Level Debug
-                $createPerformance = Measure-Command {
+            try {
+                if ($isDebugEnabled)
+                {
+                    Write-LogFile -Message "[DEBUG] Initiating Graph API audit log query..." -Level Debug
+                    $createPerformance = Measure-Command {
+                        $response = Invoke-MgGraphRequest -Method POST -Uri $apiBase -Body $body -ContentType "application/json"
+                    }
+                    Write-LogFile -Message "[DEBUG] Query creation took $([math]::round($createPerformance.TotalSeconds, 2) ) seconds" -Level Debug
+                }
+                else
+                {
                     $response = Invoke-MgGraphRequest -Method POST -Uri $apiBase -Body $body -ContentType "application/json"
                 }
-                Write-LogFile -Message "[DEBUG] Query creation took $([math]::round($createPerformance.TotalSeconds, 2) ) seconds" -Level Debug
-            }
-            else
-            {
-                $response = Invoke-MgGraphRequest -Method POST -Uri $apiBase -Body $body -ContentType "application/json"
+            } catch {
+                Write-LogFile -Message "[ERROR] Failed to create audit log query" -Color "Red" -Level Minimal
+                if ($isDebugEnabled) {
+                    Write-LogFile -Message "[DEBUG] Error details:" -Level Debug
+                    Write-LogFile -Message "[DEBUG]   Exception type: $($_.Exception.GetType().Name)" -Level Debug
+                    Write-LogFile -Message "[DEBUG]   Stack trace: $($_.ScriptStackTrace)" -Level Debug
+                }
+
+                # Check the amount of pending jobs in the tenant which may be causing the issue
+                $pendingJobs = (Invoke-MgGraphRequest -Uri $apiBase -ContentType "application/json").value | Where-Object { $_.status -notlike  "succeeded" }
+                $pendingCount = $pendingJobs.Count
+                if($pendingCount -gt 0) {
+                    Write-LogFile -Message "[INFO] There are currently $pendingCount pending audit log queries. This may be causing the issue. At most 1 unfiltered and 10 filtered queries may be running at any time." -Color "Yellow" -Level Standard
+                }
+
+                throw
             }
 
             $scanId = $response.id
