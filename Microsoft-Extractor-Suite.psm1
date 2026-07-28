@@ -216,6 +216,31 @@ function Get-GraphAuthType {
         }
     }
 
+    # Refresh context after any Connect-MgGraph attempt
+    $context = Get-MgContext
+
+    if ($context) {
+        $authType = $context.AuthType
+        $scopes = @($context.Scopes)
+
+        $missingScopes = @(
+            $RequiredScopes | Where-Object { $scopes -notcontains $_ }
+        )
+
+        Write-LogFile `
+            -Message "[INFO] Microsoft Graph context active for $($context.Account)" `
+            -Color "Green"
+    }
+    else {
+        $authType = "none"
+        $scopes = @()
+        $missingScopes = $RequiredScopes
+
+        Write-LogFile `
+            -Message "[WARNING] Microsoft Graph authentication did not create an active context." `
+            -Color "Yellow"
+    }
+
     return @{
         AuthType = $authType
         Scopes = $scopes
