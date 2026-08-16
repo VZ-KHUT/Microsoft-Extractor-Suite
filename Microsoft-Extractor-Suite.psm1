@@ -162,79 +162,6 @@ function versionCheck{
 	}
 }
 
-function Confirm-MESGraphContext {
-    param (
-        [Parameter(Mandatory)]
-        [string[]]$Scopes
-    )
-
-    # Mail.ReadWrite uses MES's existing app-only flow.
-    if ($Scopes -contains "Mail.ReadWrite") {
-        return
-    }
-
-    # Get the account used by the active MES login.
-    $azContext = $null
-    if (Get-Command Get-AzContext -ErrorAction SilentlyContinue) {
-        $azContext = Get-AzContext -ErrorAction SilentlyContinue
-    }
-
-    if ($azContext) {
-        $expectedAccount = [string]$azContext.Account.Id
-        $expectedTenant = [string]$azContext.Tenant.Id
-    }
-    elseif (Get-Command Get-ConnectionInformation -ErrorAction SilentlyContinue) {
-        $m365Context = Get-ConnectionInformation -ErrorAction SilentlyContinue |
-            Where-Object { $_.State -eq "Connected" } |
-            Select-Object -First 1
-
-        $expectedAccount = [string]$m365Context.UserPrincipalName
-        $expectedTenant = [string]$m365Context.TenantID
-    }
-
-    # Leave today's flow unchanged when no MES login can be identified.
-    if (-not $expectedAccount -or -not $expectedTenant) {
-        return
-    }
-
-    $graphContext = Get-MgContext -ErrorAction SilentlyContinue
-
-    # Only correct existing delegated Graph sessions.
-    if (
-        -not $graphContext -or
-        $graphContext.AuthType -ine "Delegated" -or
-        (
-            $graphContext.Account -ieq $expectedAccount -and
-            $graphContext.TenantId -eq $expectedTenant
-        )
-    ) {
-        return
-    }
-
-    Write-LogFile `
-        -Message "[INFO] Microsoft Graph is using a different account. Reconnecting Graph." `
-        -Color "Yellow"
-
-    Disconnect-MgGraph -ErrorAction SilentlyContinue
-
-    Connect-MgGraph `
-        -NoWelcome `
-        -TenantId $expectedTenant `
-        -Scopes $Scopes `
-        -ErrorAction Stop > $null
-
-    # Ensure Graph now matches the MES login.
-    $graphContext = Get-MgContext -ErrorAction SilentlyContinue
-
-    if (
-        -not $graphContext -or
-        $graphContext.Account -ine $expectedAccount -or
-        $graphContext.TenantId -ne $expectedTenant
-    ) {
-        throw "Microsoft Graph authentication does not match the active MES login."
-    }
-}
-
 function Get-GraphAuthType {
     param (
         [string[]]$RequiredScopes
@@ -268,7 +195,7 @@ function Get-GraphAuthType {
                 }
                 
                 Write-LogFile -Message "[INFO] Attempting to re-authenticate with the appropriate scope(s): $joinedScopes" -Color "Green"
-                Connect-MgGraph -NoWelcome -Scopes $joinedScopes > $null
+                Connect-MgGraph -NoWelcome -ContextScope Process -Scopes $joinedScopes > $null
             }
         }
         "AppOnly" {
@@ -284,36 +211,9 @@ function Get-GraphAuthType {
             }
             else {
                 Write-LogFile -Message "[INFO] No active Connect-MgGraph session found. Attempting to connect with the appropriate scope(s): $joinedScopes" -Color "Green"
-                Connect-MgGraph -NoWelcome -Scopes $joinedScopes
+                Connect-MgGraph -NoWelcome -ContextScope Process -Scopes $joinedScopes
             }
         }
-    }
-
-    Confirm-MESGraphContext -Scopes $RequiredScopes
-
-    # Refresh context after any Connect-MgGraph attempt
-    $context = Get-MgContext
-
-    if ($context) {
-        $authType = $context.AuthType
-        $scopes = @($context.Scopes)
-
-        $missingScopes = @(
-            $RequiredScopes | Where-Object { $scopes -notcontains $_ }
-        )
-
-        Write-LogFile `
-            -Message "[INFO] Microsoft Graph context active for $($context.Account)" `
-            -Color "Green"
-    }
-    else {
-        $authType = "none"
-        $scopes = @()
-        $missingScopes = $RequiredScopes
-
-        Write-LogFile `
-            -Message "[WARNING] Microsoft Graph authentication did not create an active context." `
-            -Color "Yellow"
     }
 
     return @{
